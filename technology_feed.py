@@ -1,93 +1,202 @@
+import re
+import json
 import requests
 from bs4 import BeautifulSoup
-import datetime
+from datetime import datetime
 import xml.etree.ElementTree as ET
 
-# NYTimes Technology section
-url = "https://www.nytimes.com/section/technology"
-rss_self_link = "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml"
+# Prepare XML namespaces for RSS
+ET.register_namespace('atom', "http://www.w3.org/2005/Atom")
+ET.register_namespace('media', "http://search.yahoo.com/mrss/")
+ET.register_namespace('dc', "http://purl.org/dc/elements/1.1/")
 
-headers = {"User-Agent": "Mozilla/5.0"}
+# Fetch the NYT Technology section page
+section_url = "https://www.nytimes.com/section/technology"
+resp = requests.get(section_url, headers={"User-Agent": "Mozilla/5.0"})
+resp.raise_for_status()
+soup = BeautifulSoup(resp.text, 'html.parser')
 
-response = requests.get(url, headers=headers)
-response.raise_for_status()
-soup = BeautifulSoup(response.text, "html.parser")
+# Find all article links by matching NYT's dated URL pattern
+article_links = set()
+for a in soup.find_all('a', href=True):
+    href = a['href']
+    if re.match(r'^/\d{4}/\d{2}/\d{2}/', href):  # URL starts with /YYYY/MM/DD/
+        full_url = "https://www.nytimes.com" + href
+        article_links.add(full_url)
+# Fallback: if not found via regex, look for <article> tags
+if not article_links:
+    for article in soup.find_all('article'):
+        a = article.find('a', href=True)
+        if a:
+            url = a['href']
+            if url.startswith('/'):
+                url = "https://www.nytimes.com" + url
+            if re.search(r'/\d{4}/\d{2}/\d{2}/', url):
+                article_links.add(url)
 
-# Set up RSS feed with NYT-like namespaces
-namespaces = {
-    'media': "http://search.yahoo.com/mrss/",
-    'dc': "http://purl.org/dc/elements/1.1/",
-    'atom': "http://www.w3.org/2005/Atom",
-    'nyt': "http://www.nytimes.com/namespaces/rss/2.0"
-}
-ET.register_namespace('media', namespaces['media'])
-ET.register_namespace('dc', namespaces['dc'])
-ET.register_namespace('atom', namespaces['atom'])
-ET.register_namespace('nyt', namespaces['nyt'])
-
+# Set up the RSS root and channel
 rss = ET.Element('rss', {
-    "version": "2.0",
-    "xmlns:media": namespaces['media'],
-    "xmlns:dc": namespaces['dc'],
-    "xmlns:nyt": namespaces['nyt']
+    'version': '2.0',
+    'xmlns:atom': "http://www.w3.org/2005/Atom",
+    'xmlns:media': "http://search.yahoo.com/mrss/",
+    'xmlns:dc': "http://purl.org/dc/elements/1.1/"
 })
 channel = ET.SubElement(rss, 'channel')
 ET.SubElement(channel, 'title').text = "NYT > Technology"
-ET.SubElement(channel, 'link').text = url
-ET.SubElement(channel, '{http://www.w3.org/2005/Atom}link', {
-    'href': rss_self_link,
-    'rel': 'self',
-    'type': 'application/rss+xml'
+ET.SubElement(channel, 'link').text = "https://www.nytimes.com/section/technology"
+ET.SubElement(channel, 'description').text = (
+    "Technology industry news, commentary, and analysis, with reporting on big tech, startups, and internet culture. "
+    "The New York Times is a hub for conversation about news and ideas."
+)
+# Self-referential link to the RSS (optional, identifies the feed URL)
+ET.SubElement(channel, 'atom:link', {
+    'rel': "self",
+    'href': "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
+    'type': "application/rss+xml"
 })
-ET.SubElement(channel, 'description').text = "Latest technology news from The New York Times"
-ET.SubElement(channel, 'language').text = 'en-us'
-ET.SubElement(channel, 'copyright').text = f'Copyright {datetime.datetime.now().year} The New York Times Company'
-now_str = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-ET.SubElement(channel, 'lastBuildDate').text = now_str
-ET.SubElement(channel, 'pubDate').text = now_str
 
-# Add NYT-style <image>
-image = ET.SubElement(channel, 'image')
-ET.SubElement(image, 'title').text = "NYT > Technology"
-ET.SubElement(image, 'url').text = "https://static01.nyt.com/images/misc/NYT_logo_rss_250x40.png"
-ET.SubElement(image, 'link').text = url
+# Helper to convert ISO date to RSS pubDate format
+def iso_to_rss_date(iso_str):
+    try:
+        dt = datetime.fromisoformat(iso_str.replace('Z', '+00:00'))
+        return dt.strftime('%a, %d %b %Y %H:%M:%S GMT')
+    except Exception:
+        return None
 
-# Extract articles
-articles_found = 0
-seen_titles = set()
+# Iterate through each article and extract metadata
+for url in article_links:
+    try:
+        art_resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        art_resp.raise_for_status()
+    except Exception:
+        continue  # skip if any request fails
+    art_soup = BeautifulSoup(art_resp.text, 'html.parser')
+    item = ET.SubElement(channel, 'item')
+    
+    # Parse JSON-LD metadata if available
+    title = description = pub_date = None
+    authors = []
+    image_url = image_caption = image_credit = None
+    categories = []
+    ld_script = art_soup.find('script', type='application/ld+json')
+    if ld_script:
+        try:
+            ld_data = json.loads(ld_script.string)
+        except json.JSONDecodeError:
+            # Fix any JavaScript quirks if necessary
+            ld_data = json.loads(ld_script.string.strip().strip(';'))
+        # If multiple JSON-LD entries, find the NewsArticle object
+        if isinstance(ld_data, list):
+            for entry in ld_data:
+                if isinstance(entry, dict) and entry.get('@type') in ('NewsArticle', 'Article'):
+                    ld_data = entry
+                    break
+        # Extract fields from JSON-LD
+        title = ld_data.get('headline')
+        description = ld_data.get('description')
+        # Authors can be list or single
+        author_info = ld_data.get('author')
+        if author_info:
+            if isinstance(author_info, list):
+                for auth in author_info:
+                    name = auth.get('name')
+                    if name: authors.append(name)
+            elif isinstance(author_info, dict):
+                name = author_info.get('name')
+                if name: authors.append(name)
+        pub_date = iso_to_rss_date(ld_data.get('datePublished', ''))
+        # Image metadata (if present)
+        image_info = ld_data.get('image')
+        if image_info:
+            # If multiple images, use the first one
+            if isinstance(image_info, list) and image_info:
+                image_info = image_info[0]
+            if isinstance(image_info, dict):
+                image_url = image_info.get('url') or image_info.get('contentUrl')
+                image_caption = image_info.get('caption')
+                image_credit = image_info.get('creditText')
+            elif isinstance(image_info, str):
+                image_url = image_info
 
-for teaser in soup.select('a[data-testid="link"]'):
-    h2 = teaser.find('h2')
-    if not h2:
-        continue  # Skip if no <h2> inside
+    # Fallback to HTML if JSON-LD is missing some info
+    if not title:
+        # Use the headline from HTML <title> or <h1>
+        h1 = art_soup.find('h1')
+        if h1: 
+            title = h1.get_text(strip=True)
+    if not description:
+        meta_desc = art_soup.find('meta', attrs={'name': 'description'})
+        if meta_desc:
+            description = meta_desc.get('content', '')
+    if not pub_date:
+        # Try OpenGraph or other meta for date
+        meta_time = art_soup.find('meta', attrs={'property': 'article:published_time'})
+        if meta_time:
+            pub_date = iso_to_rss_date(meta_time.get('content', ''))
+    if not authors:
+        # Try to find author from byline element (could be <span class="byline">)
+        byline = art_soup.find(attrs={'itemprop': 'author'}) or art_soup.find('span', class_='byline')
+        if byline:
+            # Remove "By " prefix and any extra whitespace
+            author_text = byline.get_text(separator=" ").replace('By ', '').strip()
+            if author_text:
+                # Split by comma or and if multiple authors listed in one string
+                if ';' in author_text or ',' in author_text:
+                    # split by common separators
+                    parts = re.split(';|,| and ', author_text)
+                    authors = [part.strip() for part in parts if part.strip()]
+                else:
+                    authors = [author_text]
+    # Categories/keywords
+    meta_keys = art_soup.find('meta', attrs={'name': 'keywords'}) or art_soup.find('meta', attrs={'name': 'news_keywords'})
+    if meta_keys:
+        raw_keys = meta_keys.get('content', '')
+        # NYT uses semicolon-separated keywords (as in adx_keywords)
+        for key in re.split(';|,', raw_keys):
+            key = key.strip()
+            if key: 
+                categories.append(key)
 
-    title = h2.get_text(strip=True)
-    href = teaser.get("href")
+    # Fill item sub-elements
+    ET.SubElement(item, 'title').text = title or "Untitled"
+    # Include tracking parameters in link as NYT does
+    link_href = url if url.endswith('?partner=rss&emc=rss') else url + '?partner=rss&emc=rss'
+    ET.SubElement(item, 'link').text = link_href
+    ET.SubElement(item, 'guid', {'isPermaLink': 'true'}).text = link_href
+    ET.SubElement(item, 'atom:link', {'rel': 'standout', 'href': link_href})
+    ET.SubElement(item, 'description').text = description or ""
+    if authors:
+        # Join multiple authors with ' and ' (two authors) or commas and 'and' (for three or more)
+        author_text = (', '.join(authors[:-1]) + ' and ' + authors[-1]) if len(authors) > 1 else authors[0]
+        ET.SubElement(item, 'dc:creator').text = author_text
+    if pub_date:
+        ET.SubElement(item, 'pubDate').text = pub_date
 
-    if not title or not href or title in seen_titles:
-        continue
+    # Map keywords to NYT category domains if available
+    for cat in categories:
+        # Determine domain by simple heuristic based on content
+        if re.match(r'^[A-Z][^,]+,\s*[A-Z]', cat):  # format "Lastname, Firstname"
+            domain = "http://www.nytimes.com/namespaces/keywords/nyt_per"
+        elif re.search(r'\bInc\b|\bCorporation\b|\bCompany\b|\bUniversity\b', cat):
+            domain = "http://www.nytimes.com/namespaces/keywords/nyt_org"
+        elif re.search(r'\bCity\b|\bStates?\b|\bEurope\b|\bAsia\b|\bAfrica\b|\bAmerica\b', cat):
+            domain = "http://www.nytimes.com/namespaces/keywords/nyt_geo"
+        else:
+            domain = "http://www.nytimes.com/namespaces/keywords/nyt_des"
+        ET.SubElement(item, 'category', {'domain': domain}).text = cat
 
-    seen_titles.add(title)
-    full_url = href if href.startswith("http") else "https://www.nytimes.com" + href
+    if image_url:
+        media_content = ET.SubElement(item, 'media:content', {
+            'url': image_url, 
+            'medium': "image"
+        })
+        if image_credit:
+            ET.SubElement(media_content, 'media:credit').text = image_credit
+        if image_caption:
+            ET.SubElement(media_content, 'media:description').text = image_caption
 
-    item = ET.SubElement(channel, "item")
-    ET.SubElement(item, "title").text = title
-    ET.SubElement(item, "link").text = full_url
-    ET.SubElement(item, "guid", {"isPermaLink": "true"}).text = full_url
-    ET.SubElement(item, '{http://www.w3.org/2005/Atom}link', {
-        'href': full_url,
-        'rel': 'standout'
-    })
-    ET.SubElement(item, "description").text = f"NYTimes technology article: {title}"
-    ET.SubElement(item, '{http://purl.org/dc/elements/1.1/}creator').text = ""
-    ET.SubElement(item, "pubDate").text = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
-
-    articles_found += 1
-    if articles_found >= 10:
-        break
-
-# Write output
+# ✅ Save to technology.xml inside your Technology repository
 with open("technology.xml", "wb") as f:
     ET.ElementTree(rss).write(f, encoding="utf-8", xml_declaration=True)
 
-print(f"✅ RSS feed created with {articles_found} Technology articles.")
+print("✅ RSS feed saved as 'technology.xml'.")
