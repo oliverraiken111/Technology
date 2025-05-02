@@ -16,14 +16,28 @@ resp = requests.get(section_url, headers={"User-Agent": "Mozilla/5.0"})
 resp.raise_for_status()
 soup = BeautifulSoup(resp.text, 'html.parser')
 
-# Find all article links by matching NYT's dated URL pattern
+# Start with an empty set
 article_links = set()
+
+# 1️⃣ First: Find all article links inside the main stream panel
+for a in soup.select('ol[data-testid="stream-panel"] a[data-testid="link"]'):
+    href = a.get('href')
+    if href and href.startswith('/'):
+        full_url = "https://www.nytimes.com" + href
+        article_links.add(full_url)
+
+print(f"✅ Found {len(article_links)} article links after stream-panel scrape.")
+for link in article_links:
+    print(link)
+
+# 2️⃣ Optional: ALSO add links that match NYT's dated URL pattern (but do NOT clear the set)
 for a in soup.find_all('a', href=True):
     href = a['href']
     if re.match(r'^/\d{4}/\d{2}/\d{2}/', href):  # URL starts with /YYYY/MM/DD/
         full_url = "https://www.nytimes.com" + href
         article_links.add(full_url)
-# Fallback: if not found via regex, look for <article> tags
+
+# 3️⃣ Optional: If STILL empty, fallback to <article> tags (only if article_links is still empty)
 if not article_links:
     for article in soup.find_all('article'):
         a = article.find('a', href=True)
@@ -33,6 +47,10 @@ if not article_links:
                 url = "https://www.nytimes.com" + url
             if re.search(r'/\d{4}/\d{2}/\d{2}/', url):
                 article_links.add(url)
+
+print(f"✅ Total unique article links collected: {len(article_links)}")
+for link in article_links:
+    print(link)
 
 # Set up the RSS root and channel
 rss = ET.Element('rss', {
