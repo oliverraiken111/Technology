@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 # NYTimes Technology section
 url = "https://www.nytimes.com/section/technology"
-rss_self_link = "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml"  # adjust if needed
+rss_self_link = "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml"
 
 headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -52,12 +52,16 @@ ET.SubElement(image, 'title').text = "NYT > Technology"
 ET.SubElement(image, 'url').text = "https://static01.nyt.com/images/misc/NYT_logo_rss_250x40.png"
 ET.SubElement(image, 'link').text = url
 
-# Extract Technology articles (from the section page)
+# Extract articles
 articles_found = 0
 seen_titles = set()
 
 for teaser in soup.select('a[data-testid="link"]'):
-    title = teaser.get_text(strip=True)
+    h2 = teaser.find('h2')
+    if not h2:
+        continue  # Skip if no <h2> inside
+
+    title = h2.get_text(strip=True)
     href = teaser.get("href")
 
     if not title or not href or title in seen_titles:
